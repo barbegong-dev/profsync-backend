@@ -80,7 +80,7 @@ class ReviewController extends Controller
         if ($request->status === 'approved' && $submission->faculty) {
             try {
                 $activeSemester = Semester::where('is_active', true)->first();
-                $reqQuery = Requirement::where('is_required', true);
+                $reqQuery = Requirement::where('is_required', true)->forDepartment($submission->faculty->department_id);
                 if ($activeSemester) {
                     $reqQuery->where('semester_id', $activeSemester->id);
                 }

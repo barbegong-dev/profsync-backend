@@ -61,9 +61,19 @@ Route::middleware('auth:sanctum')->group(function () {
         Route::get('/chair/members/{user}/submissions', [MemberController::class, 'submissions']);
     });
 
-    // Analytics: whole workspace for admins, own department for chairs
+    // Admins and program chairs: analytics, requirements and semesters.
+    // Chairs see analytics for, and manage the requirements of, their own department.
     Route::middleware('role:admin|program_chair')->group(function () {
         Route::get('/analytics', [AnalyticsController::class, 'index']);
+
+        // Requirements management
+        Route::get('/admin/requirements', [RequirementController::class, 'index']);
+        Route::post('/admin/requirements', [RequirementController::class, 'store']);
+        Route::put('/admin/requirements/{requirement}', [RequirementController::class, 'update']);
+        Route::delete('/admin/requirements/{requirement}', [RequirementController::class, 'destroy']);
+
+        // Semester management (shared by the whole workspace)
+        Route::apiResource('semesters', SemesterController::class);
     });
 
     // Dean routes
@@ -87,14 +97,6 @@ Route::middleware('auth:sanctum')->group(function () {
         Route::put('/admin/departments/{department}', [DepartmentController::class, 'update']);
         Route::delete('/admin/departments/{department}', [DepartmentController::class, 'destroy']);
 
-        // Requirements management
-        Route::get('/admin/requirements', [RequirementController::class, 'index']);
-        Route::post('/admin/requirements', [RequirementController::class, 'store']);
-        Route::put('/admin/requirements/{requirement}', [RequirementController::class, 'update']);
-        Route::delete('/admin/requirements/{requirement}', [RequirementController::class, 'destroy']);
-
-        // Semester management
-        Route::apiResource('semesters', SemesterController::class);
     });
 
     // Platform super admin routes

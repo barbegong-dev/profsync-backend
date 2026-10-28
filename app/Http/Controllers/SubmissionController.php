@@ -23,6 +23,10 @@ class SubmissionController extends Controller
             'document' => 'required|file|mimes:pdf,docx,doc'
         ]);
 
+        // Only requirements of this workspace that apply to the faculty member's department
+        $applies = Requirement::forDepartment(Auth::user()->department_id)->whereKey($request->requirement_id)->exists();
+        abort_unless($applies, 422, 'This requirement does not apply to your department.');
+
         $path = $request->file('document')->store('submissions', 'public');
 
         $submission = Submission::updateOrCreate(
@@ -90,7 +94,9 @@ class SubmissionController extends Controller
             return response()->json([]);
         }
 
-        $requirements = Requirement::where('semester_id', $activeSemester->id)->get();
+        $requirements = Requirement::where('semester_id', $activeSemester->id)
+            ->forDepartment(Auth::user()->department_id)
+            ->get();
         $submissions = Submission::where('faculty_id', Auth::id())
             ->whereIn('requirement_id', $requirements->pluck('id'))
             ->get()

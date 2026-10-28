@@ -7,18 +7,25 @@ use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Auth;
 use Illuminate\Validation\Rule;
 
+/**
+ * Requirements management for workspace admins and program chairs.
+ * Admins manage every requirement and choose who it applies to (all departments or one).
+ * Chairs see the requirements that apply to their department and manage only their department's own.
+ */
 class RequirementController extends Controller
 {
     /**
-     * List all requirements with submission counts
+     * List requirements with submission counts
      */
     public function index()
     {
-        // Should probably filter by active semester or all? 
-        // For now, let's return all, or just let frontend filter.
-        $requirements = Requirement::with('semester')->withCount('submissions')
+        $chairDepartment = $this->chairDepartmentId();
+
+        $requirements = Requirement::with(['semester', 'department'])->withCount('submissions')
+            ->when($chairDepartment, fn ($q) => $q->forDepartment($chairDepartment))
             ->orderBy('created_at', 'desc')
-            ->get();
+            ->get()
+            ->each(fn ($r) => $r->setAttribute('can_edit', $this->canEdit($r)));
 
         return response()->json($requirements);
     }
@@ -28,10 +35,13 @@ class RequirementController extends Controller
      */
     public function store(Request $request)
     {
+        $this->forceChairDepartment($request);
+
         $request->validate([
             'name' => 'required|string|max:255',
             'description' => 'nullable|string',
             'semester_id' => ['required', Rule::exists('semesters', 'id')->where('tenant_id', Auth::user()->tenant_id)],
+            'department_id' => ['nullable', Rule::exists('departments', 'id')->where('tenant_id', Auth::user()->tenant_id)],
             'is_required' => 'boolean',
             'deadline' => 'nullable|date'
         ]);
@@ -40,6 +50,7 @@ class RequirementController extends Controller
             'name' => $request->name,
             'description' => $request->description,
             'semester_id' => $request->semester_id,
+            'department_id' => $request->department_id,
             'is_required' => $request->is_required ?? true,
             'deadline' => $request->deadline
         ]);
@@ -56,10 +67,14 @@ class RequirementController extends Controller
      */
     public function update(Request $request, Requirement $requirement)
     {
+        $this->authorizeEdit($requirement);
+        $this->forceChairDepartment($request);
+
         $request->validate([
             'name' => 'required|string|max:255',
             'description' => 'nullable|string',
             'semester_id' => ['required', Rule::exists('semesters', 'id')->where('tenant_id', Auth::user()->tenant_id)],
+            'department_id' => ['nullable', Rule::exists('departments', 'id')->where('tenant_id', Auth::user()->tenant_id)],
             'is_required' => 'boolean',
             'deadline' => 'nullable|date'
         ]);
@@ -68,6 +83,7 @@ class RequirementController extends Controller
             'name' => $request->name,
             'description' => $request->description,
             'semester_id' => $request->semester_id,
+            'department_id' => $request->department_id,
             'is_required' => $request->is_required ?? true,
             'deadline' => $request->deadline
         ]);
@@ -84,6 +100,8 @@ class RequirementController extends Controller
      */
     public function destroy(Requirement $requirement, Request $request)
     {
+        $this->authorizeEdit($requirement);
+
         $submissionCount = $requirement->submissions()->count();
 
         // If force delete is requested and user is admin (implied by route middleware usually, but good to check or trust middleware)
@@ -113,5 +131,36 @@ class RequirementController extends Controller
             'success' => true,
             'message' => 'Requirement deleted successfully'
         ]);
+    }
+
+    /** The chair's department, or null for admins. */
+    private function chairDepartmentId(): ?int
+    {
+        $user = Auth::user();
+        if ($user->hasRole('admin')) {
+            return null;
+        }
+
+        abort_unless($user->department_id, 403, 'You are not assigned to a department. Ask the workspace admin to assign one.');
+        return $user->department_id;
+    }
+
+    private function canEdit(Requirement $requirement): bool
+    {
+        $chairDepartment = $this->chairDepartmentId();
+        return $chairDepartment === null || $requirement->department_id === $chairDepartment;
+    }
+
+    private function authorizeEdit(Requirement $requirement): void
+    {
+        abort_unless($this->canEdit($requirement), 403, 'Only the workspace admin can change requirements that apply to every department.');
+    }
+
+    /** Chairs' requirements always belong to their own department. */
+    private function forceChairDepartment(Request $request): void
+    {
+        if ($chairDepartment = $this->chairDepartmentId()) {
+            $request->merge(['department_id' => $chairDepartment]);
+        }
     }
 }

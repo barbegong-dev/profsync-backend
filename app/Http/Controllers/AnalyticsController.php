@@ -29,9 +29,12 @@ class AnalyticsController extends Controller
 
         $semester = Semester::where('is_active', true)->first();
         $requirements = $semester
-            ? Requirement::where('semester_id', $semester->id)->orderByRaw('deadline IS NULL, deadline')->orderBy('name')->get()
+            ? Requirement::with('department')
+                ->where('semester_id', $semester->id)
+                ->when($departmentId, fn ($q) => $q->forDepartment($departmentId))
+                ->orderByRaw('deadline IS NULL, deadline')->orderBy('name')
+                ->get()
             : collect();
-        $requiredIds = $requirements->where('is_required', true)->pluck('id');
 
         $members = User::with(['roles', 'department'])
             ->where('tenant_id', $user->tenant_id)
@@ -46,11 +49,14 @@ class AnalyticsController extends Controller
 
         $now = Carbon::now();
 
-        // One row per faculty member: their status counts and clearance
-        $facultyStats = $faculty->map(function ($f) use ($byFaculty, $requirements, $requiredIds, $now) {
-            $subs = ($byFaculty[$f->id] ?? collect())->keyBy('requirement_id');
-            $counts = $this->statusCounts($subs, $requirements->count());
-            $overdue = $requirements->filter(fn ($r) => !$subs->has($r->id) && $r->deadline && Carbon::parse($r->deadline)->lt($now))->count();
+        // One row per faculty member: their status counts and clearance,
+        // counting only the requirements that apply to their department
+        $facultyStats = $faculty->map(function ($f) use ($byFaculty, $requirements, $now) {
+            $applicable = $requirements->filter(fn ($r) => $r->appliesTo($f->department_id));
+            $requiredIds = $applicable->where('is_required', true)->pluck('id');
+            $subs = ($byFaculty[$f->id] ?? collect())->whereIn('requirement_id', $applicable->pluck('id'))->keyBy('requirement_id');
+            $counts = $this->statusCounts($subs, $applicable->count());
+            $overdue = $applicable->filter(fn ($r) => !$subs->has($r->id) && $r->deadline && Carbon::parse($r->deadline)->lt($now))->count();
             $approvedRequired = $subs->whereIn('requirement_id', $requiredIds)->where('status', 'approved')->count();
 
             return [
@@ -79,7 +85,7 @@ class AnalyticsController extends Controller
 
         $byRequirement = $requirements->map(function ($r) use ($submissions, $faculty, $now) {
             $subs = $submissions->where('requirement_id', $r->id);
-            $counts = $this->statusCounts($subs, $faculty->count());
+            $counts = $this->statusCounts($subs, $faculty->filter(fn ($f) => $r->appliesTo($f->department_id))->count());
             $pastDeadline = $r->deadline && Carbon::parse($r->deadline)->lt($now);
 
             return [
@@ -87,6 +93,7 @@ class AnalyticsController extends Controller
                 'name' => $r->name,
                 'deadline' => $r->deadline,
                 'is_required' => (bool) $r->is_required,
+                'department' => $r->department?->name, // null: every department
                 ...$counts,
                 'overdue' => $pastDeadline ? $counts['missing'] : 0,
             ];

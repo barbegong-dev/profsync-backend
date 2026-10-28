@@ -191,7 +191,9 @@ class MemberController extends Controller
             return response()->json([]);
         }
 
-        $requirements = \App\Models\Requirement::where('semester_id', $activeSemester->id)->get();
+        $requirements = \App\Models\Requirement::where('semester_id', $activeSemester->id)
+            ->forDepartment($user->department_id)
+            ->get();
         $submissions = \App\Models\Submission::where('faculty_id', $user->id)
             ->whereIn('requirement_id', $requirements->pluck('id'))
             ->get()

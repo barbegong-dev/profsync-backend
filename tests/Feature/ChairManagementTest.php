@@ -10,6 +10,7 @@ use App\Models\Tenant;
 use App\Models\User;
 use Database\Seeders\DatabaseSeeder;
 use Illuminate\Foundation\Testing\RefreshDatabase;
+use Illuminate\Http\UploadedFile;
 use Illuminate\Support\Facades\Mail;
 use Laravel\Sanctum\Sanctum;
 use Tests\TestCase;
@@ -168,5 +169,51 @@ class ChairManagementTest extends TestCase
 
         Sanctum::actingAs($csFaculty);
         $this->getJson('/api/analytics')->assertForbidden();
+    }
+
+    public function test_chair_requirements_apply_only_to_their_department(): void
+    {
+        $semester = Semester::create(['tenant_id' => $this->tenant->id, 'name' => '1st Sem', 'is_active' => true]);
+        $shared = Requirement::create(['tenant_id' => $this->tenant->id, 'semester_id' => $semester->id, 'name' => 'Syllabus', 'is_required' => true]);
+        $csFaculty = $this->member('CS Faculty', 'csf@prmsu.com', 'faculty', $this->cs);
+        $itFaculty = $this->member('IT Faculty', 'itf@prmsu.com', 'faculty', $this->it);
+
+        Sanctum::actingAs($this->chair);
+        $this->postJson('/api/admin/requirements', [
+            'name' => 'Lab Manual', 'semester_id' => $semester->id, 'department_id' => $this->it->id,
+        ])->assertCreated();
+        $labManual = Requirement::where('name', 'Lab Manual')->first();
+        $this->assertSame($this->cs->id, $labManual->department_id);
+
+        // Chairs can't change requirements that apply to every department
+        $this->putJson("/api/admin/requirements/{$shared->id}", ['name' => 'X', 'semester_id' => $semester->id])->assertForbidden();
+        $this->deleteJson("/api/admin/requirements/{$shared->id}")->assertForbidden();
+        $listed = collect($this->getJson('/api/admin/requirements')->assertOk()->json())->keyBy('name');
+        $this->assertFalse($listed['Syllabus']['can_edit']);
+        $this->assertTrue($listed['Lab Manual']['can_edit']);
+
+        Sanctum::actingAs($csFaculty);
+        $this->assertEqualsCanonicalizing(['Syllabus', 'Lab Manual'],
+            collect($this->getJson('/api/submissions/checklist')->json())->pluck('requirement')->all());
+
+        Sanctum::actingAs($itFaculty);
+        $this->assertSame(['Syllabus'], collect($this->getJson('/api/submissions/checklist')->json())->pluck('requirement')->all());
+        $this->post('/api/submissions/upload', [
+            'requirement_id' => $labManual->id,
+            'document' => UploadedFile::fake()->create('a.pdf', 10, 'application/pdf'),
+        ], ['Accept' => 'application/json'])->assertStatus(422);
+
+        // Workspace analytics don't expect the CS-only requirement from IT faculty
+        Sanctum::actingAs($this->admin);
+        $this->getJson('/api/analytics')->assertOk()->assertJsonPath('summary.expected', 3);
+    }
+
+    public function test_chair_manages_semesters(): void
+    {
+        Sanctum::actingAs($this->chair);
+
+        $id = $this->postJson('/api/semesters', ['name' => '2nd Sem', 'is_active' => true])->assertCreated()->json('semester.id');
+        $this->putJson("/api/semesters/{$id}", ['name' => '2nd Semester', 'is_active' => true])->assertOk();
+        $this->deleteJson("/api/semesters/{$id}?confirmation=delete")->assertOk();
     }
 }

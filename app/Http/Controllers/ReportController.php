@@ -34,7 +34,7 @@ class ReportController extends Controller
         $user = auth()->user();
         
         $activeSemester = \App\Models\Semester::where('is_active', true)->first();
-        $reqQuery = \App\Models\Requirement::where('is_required', true);
+        $reqQuery = \App\Models\Requirement::where('is_required', true)->forDepartment($user->department_id);
         if ($activeSemester) {
             $reqQuery->where('semester_id', $activeSemester->id);
         }
