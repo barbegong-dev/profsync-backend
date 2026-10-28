@@ -11,17 +11,35 @@ use Illuminate\Support\Facades\Log;
 use Illuminate\Validation\Rule;
 
 /**
- * Workspace admin management of the users in their own tenant.
- * Members sign in with Google, so admins only set name, email, role and department.
+ * Member management for workspace admins and program chairs.
+ * Members sign in with Google, so managers only set name, email, role and department.
+ *
+ * - Admins manage everyone in their tenant.
+ * - Program chairs manage the faculty of their own department, and can approve or reject
+ *   pending sign-ups into it. Only admins can add or assign program chairs, deans and admins.
+ * - A department can have at most MAX_CHAIRS program chairs.
  */
-class AdminUserController extends Controller
+class MemberController extends Controller
 {
-    private const ROLES = ['admin', 'dean', 'program_chair', 'faculty'];
+    public const MAX_CHAIRS = 2;
+
+    private const ADMIN_ROLES = ['admin', 'dean', 'program_chair', 'faculty'];
+    private const CHAIR_ROLES = ['faculty'];
 
     public function index()
     {
-        $users = User::with(['roles', 'department'])
-            ->where('tenant_id', $this->tenantId())
+        $query = User::with(['roles', 'department'])
+            ->where('tenant_id', $this->tenantId());
+
+        if ($this->isChair()) {
+            $departmentId = $this->chairDepartmentId();
+            $query->where(function ($q) use ($departmentId) {
+                $q->where('department_id', $departmentId)
+                    ->orWhere(fn ($p) => $p->where('status', 'pending')->whereNull('department_id'));
+            });
+        }
+
+        $users = $query
             ->orderByRaw("CASE WHEN status = 'pending' THEN 1 ELSE 2 END")
             ->orderBy('created_at', 'desc')
             ->get();
@@ -34,19 +52,25 @@ class AdminUserController extends Controller
      */
     public function store(Request $request)
     {
+        $this->forceChairDepartment($request);
+
         $request->validate([
             'name' => 'required|string|max:255',
             'email' => 'required|string|email|max:255|unique:users',
-            'role' => ['required', Rule::in(self::ROLES)],
+            'role' => ['required', Rule::in($this->allowedRoles())],
             'department_id' => $this->departmentRule($request->role),
         ]);
+
+        if ($error = $this->chairLimitError($request->role, $request->department_id)) {
+            return response()->json(['message' => $error], 422);
+        }
 
         $user = User::create([
             'tenant_id' => $this->tenantId(),
             'name' => $request->name,
             'email' => $request->email,
             'department_id' => $request->department_id,
-            'status' => 'approved', // Admin added users are pre-approved
+            'status' => 'approved', // Manager added users are pre-approved
         ]);
 
         $user->assignRole($request->role);
@@ -62,17 +86,22 @@ class AdminUserController extends Controller
 
     public function update(Request $request, User $user)
     {
-        $this->authorizeTenant($user);
+        $this->authorizeManage($user);
+        $this->forceChairDepartment($request);
 
         $request->validate([
             'name' => 'required|string|max:255',
             'email' => ['required', 'string', 'email', 'max:255', Rule::unique('users')->ignore($user->id)],
-            'role' => ['required', Rule::in(self::ROLES)],
+            'role' => ['required', Rule::in($this->allowedRoles())],
             'department_id' => $this->departmentRule($request->role),
         ]);
 
         if ($user->id === Auth::id() && $request->role !== 'admin') {
             return response()->json(['message' => 'You cannot remove your own admin role.'], 422);
+        }
+
+        if ($error = $this->chairLimitError($request->role, $request->department_id, $user)) {
+            return response()->json(['message' => $error], 422);
         }
 
         $user->load('roles', 'department');
@@ -105,7 +134,7 @@ class AdminUserController extends Controller
 
     public function approve(User $user)
     {
-        $this->authorizeTenant($user);
+        $this->authorizeManage($user);
 
         if (!$user->hasRole('admin') && !$user->department_id) {
             return response()->json(['message' => 'Assign a department to this user before approving.'], 422);
@@ -113,10 +142,11 @@ class AdminUserController extends Controller
 
         $user->update(['status' => 'approved']);
 
+        $approver = $this->isChair() ? 'your Program Chair' : 'the administrator';
         try {
             Notification::create([
                 'user_id' => $user->id,
-                'message' => 'Congratulations! Your account has been approved by the administrator. You now have full access to ProfSync.',
+                'message' => "Congratulations! Your account has been approved by {$approver}. You now have full access to ProfSync.",
                 'read' => false,
             ]);
         } catch (\Throwable $e) {
@@ -133,7 +163,7 @@ class AdminUserController extends Controller
 
     public function destroy(User $user)
     {
-        $this->authorizeTenant($user);
+        $this->authorizeManage($user);
 
         if ($user->id === Auth::id()) {
             return response()->json(['message' => 'You cannot delete your own account.'], 422);
@@ -153,7 +183,7 @@ class AdminUserController extends Controller
 
     public function submissions(User $user)
     {
-        $this->authorizeTenant($user);
+        $this->authorizeView($user);
 
         $activeSemester = \App\Models\Semester::where('is_active', true)->first();
 
@@ -187,9 +217,76 @@ class AdminUserController extends Controller
         return Auth::user()->tenant_id;
     }
 
-    private function authorizeTenant(User $user): void
+    private function isChair(): bool
+    {
+        return !Auth::user()->hasRole('admin') && Auth::user()->hasRole('program_chair');
+    }
+
+    private function chairDepartmentId(): int
+    {
+        $departmentId = Auth::user()->department_id;
+        abort_unless($departmentId, 403, 'You are not assigned to a department. Ask the workspace admin to assign one.');
+
+        return $departmentId;
+    }
+
+    private function allowedRoles(): array
+    {
+        return $this->isChair() ? self::CHAIR_ROLES : self::ADMIN_ROLES;
+    }
+
+    /** Chairs always add and assign members to their own department. */
+    private function forceChairDepartment(Request $request): void
+    {
+        if ($this->isChair()) {
+            $request->merge(['department_id' => $this->chairDepartmentId()]);
+        }
+    }
+
+    /** Chairs may view anyone in their department. */
+    private function authorizeView(User $user): void
     {
         abort_if($user->tenant_id !== $this->tenantId(), 404);
+
+        if ($this->isChair()) {
+            abort_if($user->department_id !== $this->chairDepartmentId(), 404);
+        }
+    }
+
+    /** Chairs may change faculty of their department and pending sign-ups that have no department yet. */
+    private function authorizeManage(User $user): void
+    {
+        abort_if($user->tenant_id !== $this->tenantId(), 404);
+
+        if (!$this->isChair()) {
+            return;
+        }
+
+        $pendingUnassigned = $user->status === 'pending' && $user->department_id === null;
+        $ownFaculty = $user->department_id === $this->chairDepartmentId();
+        abort_unless($pendingUnassigned || $ownFaculty, 404);
+
+        if (!$user->hasRole('faculty') || $user->hasAnyRole(['admin', 'dean', 'program_chair'])) {
+            abort(403, 'Only the workspace admin can manage program chairs, deans and admins.');
+        }
+    }
+
+    /** A department can have at most MAX_CHAIRS program chairs. */
+    private function chairLimitError(?string $role, $departmentId, ?User $except = null): ?string
+    {
+        if ($role !== 'program_chair' || !$departmentId) {
+            return null;
+        }
+
+        $chairs = User::role('program_chair')
+            ->where('tenant_id', $this->tenantId())
+            ->where('department_id', $departmentId)
+            ->when($except, fn ($q) => $q->where('id', '!=', $except->id))
+            ->count();
+
+        return $chairs >= self::MAX_CHAIRS
+            ? 'This department already has ' . self::MAX_CHAIRS . ' program chairs. Change one of them to another role first.'
+            : null;
     }
 
     private function departmentRule(?string $role): array

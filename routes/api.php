@@ -4,7 +4,8 @@ use App\Http\Controllers\AuthController;
 use App\Http\Controllers\SubmissionController;
 use App\Http\Controllers\ReviewController;
 use App\Http\Controllers\ReportController;
-use App\Http\Controllers\AdminUserController;
+use App\Http\Controllers\MemberController;
+use App\Http\Controllers\AnalyticsController;
 use App\Http\Controllers\DepartmentController;
 use App\Http\Controllers\RequirementController;
 use App\Http\Controllers\NotificationController;
@@ -50,6 +51,19 @@ Route::middleware('auth:sanctum')->group(function () {
         Route::get('/reviews', [ReviewController::class, 'index']);
         Route::post('/reviews/{submission}', [ReviewController::class, 'review']);
         Route::get('/compliance', [ReportController::class, 'compliance']);
+
+        // Faculty of the chair's own department
+        Route::get('/chair/members', [MemberController::class, 'index']);
+        Route::post('/chair/members', [MemberController::class, 'store']);
+        Route::put('/chair/members/{user}', [MemberController::class, 'update']);
+        Route::post('/chair/members/{user}/approve', [MemberController::class, 'approve']);
+        Route::delete('/chair/members/{user}', [MemberController::class, 'destroy']);
+        Route::get('/chair/members/{user}/submissions', [MemberController::class, 'submissions']);
+    });
+
+    // Analytics: whole workspace for admins, own department for chairs
+    Route::middleware('role:admin|program_chair')->group(function () {
+        Route::get('/analytics', [AnalyticsController::class, 'index']);
     });
 
     // Dean routes
@@ -61,12 +75,12 @@ Route::middleware('auth:sanctum')->group(function () {
     Route::middleware('role:admin')->group(function () {
         Route::get('/admin/setup', [SetupController::class, 'status']);
 
-        Route::get('/admin/users', [AdminUserController::class, 'index']);
-        Route::post('/admin/users', [AdminUserController::class, 'store']);
-        Route::put('/admin/users/{user}', [AdminUserController::class, 'update']);
-        Route::post('/admin/users/{user}/approve', [AdminUserController::class, 'approve']);
-        Route::delete('/admin/users/{user}', [AdminUserController::class, 'destroy']);
-        Route::get('/admin/users/{user}/submissions', [AdminUserController::class, 'submissions']);
+        Route::get('/admin/users', [MemberController::class, 'index']);
+        Route::post('/admin/users', [MemberController::class, 'store']);
+        Route::put('/admin/users/{user}', [MemberController::class, 'update']);
+        Route::post('/admin/users/{user}/approve', [MemberController::class, 'approve']);
+        Route::delete('/admin/users/{user}', [MemberController::class, 'destroy']);
+        Route::get('/admin/users/{user}/submissions', [MemberController::class, 'submissions']);
 
         // Departments management
         Route::post('/admin/departments', [DepartmentController::class, 'store']);
